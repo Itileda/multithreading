@@ -7,6 +7,11 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
+#ifdef USE_POLL
+#include <poll.h>
+#endif
+
+#define POLL_SIZE 2048
 
 int set_nonblock(int fd) {
   int flags;
@@ -28,7 +33,7 @@ int main() {
 
   struct sockaddr_in sa;
   sa.sin_family = AF_INET;
-  sa.sin_port = htons(12345);
+  sa.sin_port = htons(12346);
   sa.sin_addr.s_addr = htonl(INADDR_ANY);
 
   if (-1 == bind(sd, (sockaddr*)&sa, sizeof(sa))) {
@@ -42,13 +47,45 @@ int main() {
   }
   int BUF_SIZE = 1024;
   char buf[BUF_SIZE];
+
+#ifdef USE_POLL
+  struct pollfd pollfd_arr[POLL_SIZE];
+  pollfd_arr[0].fd = sd;
+  pollfd_arr[0].events = POLLIN;
+#endif
   while (true) {
-    //    int client_sd = accept(sd, 0, 0);
-    //    if (client_sd < 0) {
-    //      return 3;
-    //    }
+#ifdef USE_POLL
+    unsigned int index = 1;
+    for (auto sl_sock : SlaveSockets) {
+      pollfd_arr[index].fd = sl_sock;
+      pollfd_arr[index].events = POLLIN;
+      index++;
+    }
+    unsigned int SetSize = 1 + SlaveSockets.size();
+    poll(pollfd_arr, SetSize, -1);
+    for (uint i = 0; i < SetSize; i++) {
+      if (pollfd_arr[i].revents & POLLIN) {
+        if (i) {
+          static char buffer[1024];
+          int recv_size = recv(pollfd_arr[i].fd, buffer, 1024, MSG_NOSIGNAL);
+          if (recv_size == 0 && errno != EAGAIN) {
+            shutdown(pollfd_arr[i].fd, SHUT_RDWR);
+            close(pollfd_arr[i].fd);
+            SlaveSockets.erase(pollfd_arr[i].fd);
+          } else if (recv_size > 0) {
+            send(pollfd_arr[i].fd, buffer, recv_size, MSG_NOSIGNAL);
+          }
+        } else {
+          int slave_sock = accept(sd, 0, 0);
+          set_nonblock(slave_sock);
+          SlaveSockets.insert(slave_sock);
+        }
+      }
+    }
+#endif
     int fail = 0;
     while (!fail) {
+#ifdef USE_SELECT
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(sd, &rfds);
@@ -95,6 +132,7 @@ int main() {
         set_nonblock(sl_sock);
         SlaveSockets.insert(sl_sock);
       }
+#endif
     }
     std::cout << "Client disconnected" << std::endl;
   }
